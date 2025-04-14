@@ -1,109 +1,94 @@
 import streamlit as st
-import pandas as pd
+import requests
 import numpy as np
-import matplotlib.pyplot as plt
+import cv2
+from PIL import Image
+import time
+import tensorflow as tf
+import os
 
-# Pengaturan halaman Streamlit
-st.set_page_config(page_title="Dashboard Lift Prioritas", layout="wide")
+# Ubidots Config
+UBIDOTS_TOKEN = "BBUS-jsfxoukARnkvGzSfmBBAdtzV60TQF3"
+DEVICE_LABEL = "demo-machine"
+VARIABLE_LABEL = "led_status"  # Will send numbers 1, 2, or 3
 
-# Judul Aplikasi
-st.title("🚠 Dashboard Lift Prioritas di Jembatan Penyeberangan Orang")
-st.markdown("Selamat datang di **Dashboard Lift Prioritas**, di mana kamu bisa melihat informasi terkait penggunaan lift oleh masyarakat, khususnya kelompok rentan. 👥")
+# Load TFLite model
+interpreter = tf.lite.Interpreter(model_path="./model/disability_detection.tflite")
+interpreter.allocate_tensors()
 
-st.markdown("---")
+def predict_image(image):
+    try:
+        # Convert image to OpenCV format
+        img_array = np.array(image.convert('L'))  # Convert to grayscale
+        
+        # Calculate sharpness
+        sharpness = cv2.Laplacian(img_array, cv2.CV_64F).var()
+        
+        if sharpness < 15:  # Threshold for blur detection
+            return np.nan  # Use numpy's nan instead of float('nan')
+            
+        # Normal preprocessing for valid images
+        img_array = np.array(image.resize((224, 224))) / 255.0
+        img_array = np.expand_dims(img_array, axis=0).astype(np.float32)
+        
+        # Run inference
+        interpreter.set_tensor(interpreter.get_input_details()[0]['index'], img_array)
+        interpreter.invoke()
+        return interpreter.get_tensor(interpreter.get_output_details()[0]['index'])[0][0]
+        
+    except Exception as e:
+        print(f"Prediction error: {str(e)}")
+        return np.nan
 
-# Fungsi untuk Membuat Data Dummy
-def create_dummy_data():
-    dates = pd.date_range(start="2025-04-01", periods=30)
-    data = {
-        "timestamp": np.random.choice(dates, size=100),
-        "is_vulnerable": np.random.choice([True, False], size=100),
-        "gender": np.random.choice(["Pria", "Wanita"], size=100),
-        "age": np.random.randint(18, 80, size=100),
-        "vulnerable_type": np.random.choice(["Disabilitas", "Lansia", "Ibu Hamil"], size=100)
+def send_to_ubidots(status_code, status_message):
+    """Send status code and status message with timestamp to Ubidots"""
+    url = f"https://industrial.api.ubidots.com/api/v1.6/devices/{DEVICE_LABEL}"
+    headers = {"X-Auth-Token": UBIDOTS_TOKEN}
+    payload = {
+        "led_status": status_code,
+        "status_info": {
+            "value": status_code,
+            "context": {
+                "message": status_message
+            }
+        },
+        "timestamp": int(time.time() * 1000)
     }
-    return pd.DataFrame(data)
+    response = requests.post(url, headers=headers, json=payload)
+    print(f"Ubidots Response: {response.json()}")
+    return response.json()
 
-# Generate Data
-df = create_dummy_data()
 
-# Statistik Utama
-st.header("📊 Statistik Umum Pengguna")
-col1, col2, col3 = st.columns(3)
+# Streamlit UI
+st.title("Disability Detection IoT System")
+uploaded_file = st.file_uploader("Upload an image", type=["jpg", "png"])
 
-with col1:
-    total_vulnerable_users = df[df['is_vulnerable']].shape[0]
-    st.metric("Kelompok Rentan", f"{total_vulnerable_users} Orang")
+if uploaded_file:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", width=300)
+    
+    try:
+        prediction = predict_image(image)
+        if np.isnan(prediction):
+            raise ValueError("Image too blurry or invalid")
+            
+        confidence_threshold = 0.9  # 90% confidence threshold
+        disability_threshold = 0.5  # Original threshold for disability classification
+        
+        # Get the confidence (higher of prediction or 1-prediction)
+        confidence = max(prediction, 1 - prediction)
+        
+        if confidence < confidence_threshold:
+            st.error(f"Low confidence prediction ({confidence:.2%})")
+            send_to_ubidots(3, "Gagal memindai")  # Red LED + Message
+        elif prediction > disability_threshold:
+            st.success(f"Person with disability (Confidence: {prediction:.2%})")
+            send_to_ubidots(1, "Pintu dibuka")  # Green LED + Message
+        else:
+            st.warning(f"Person without disability (Confidence: {1 - prediction:.2%})")
+            send_to_ubidots(2, "Silakan gunakan tangga yang tersedia")  # Yellow LED + Message
 
-with col2:
-    total_users = df.shape[0]
-    percentage_vulnerable = (total_vulnerable_users / total_users) * 100 if total_users > 0 else 0.0
-    st.metric("% Pengguna Rentan", f"{percentage_vulnerable:.2f}%")
-
-with col3:
-    average_daily_users = df.groupby(df['timestamp'].dt.date).size().mean()
-    st.metric("Rata-rata per Hari", f"{average_daily_users:.2f} Orang")
-
-st.markdown("---")
-
-# Line Chart
-st.subheader("📈 Tren Penggunaan Lift Per Hari")
-daily_counts = df.groupby(df['timestamp'].dt.date).size()
-plt.figure(figsize=(10, 5))
-plt.plot(daily_counts.index.astype(str), daily_counts.values, marker='o', linestyle='-', color='royalblue')
-plt.title('Jumlah Pengguna Lift Prioritas per Hari')
-plt.xlabel('Tanggal')
-plt.ylabel('Jumlah Pengguna')
-plt.xticks(rotation=45)
-plt.tight_layout()
-st.pyplot(plt)
-
-# Pie Chart Jenis Kelamin
-st.subheader("👤 Distribusi Pengguna Berdasarkan Jenis Kelamin")
-gender_counts = df['gender'].value_counts()
-fig1, ax1 = plt.subplots()
-ax1.pie(gender_counts.values, labels=gender_counts.index, autopct='%1.1f%%', startangle=90, colors=['#66b3ff','#ff9999'])
-ax1.axis('equal')
-plt.title('Distribusi Jenis Kelamin Pengguna')
-st.pyplot(fig1)
-
-st.markdown("---")
-
-# Tabel Data Pengguna
-st.subheader("📋 Tabel Data Pengguna JPO")
-user_table_columns = ["No.", "Timestamp", "Apakah Kelompok Rentan?"]
-user_table_data = [
-    [i + 1 for i in range(len(df))],
-    df["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist(),
-    df["is_vulnerable"].apply(lambda x: '✅ Ya' if x else '❌ Tidak').tolist(),
-]
-
-user_table_df = pd.DataFrame(user_table_data).T.rename(columns={0: user_table_columns[0], 
-                                                                1: user_table_columns[1], 
-                                                                2: user_table_columns[2]})
-st.dataframe(user_table_df)
-
-# Tabel Kelompok Rentan
-st.subheader("🧓👩‍🦽👶 Tabel Data Anggota Kelompok Rentan")
-vulnerable_group_df = df[df['is_vulnerable']][["timestamp", "gender", "age", "vulnerable_type"]].reset_index(drop=True)
-
-vulnerability_user_columns = ["No.", 'Timestamp', 'Jenis Kelamin', 'Usia', 'Jenis Kelompok Rentan']
-vulnerability_user_data = [
-    [i + 1 for i in range(len(vulnerable_group_df))],
-    vulnerable_group_df["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S').tolist(),
-    vulnerable_group_df["gender"].tolist(),
-    vulnerable_group_df["age"].tolist(),
-    vulnerable_group_df["vulnerable_type"].tolist()
-]
-
-vulnerability_user_dataframe = pd.DataFrame(vulnerability_user_data).T.rename(columns={0: vulnerability_user_columns[0],
-                                                                                       1: vulnerability_user_columns[1],
-                                                                                       2: vulnerability_user_columns[2],
-                                                                                       3: vulnerability_user_columns[3],
-                                                                                       4: vulnerability_user_columns[4]})
-
-if not vulnerability_user_dataframe.empty:
-    st.dataframe(vulnerability_user_dataframe)
-else:
-    st.info("Tidak ada data kelompok rentan saat ini.")
-
+            
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        send_to_ubidots(3, "Gagal memindai")  # Red LED for errors
