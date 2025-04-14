@@ -2,3 +2,6 @@ matplotlib
 numpy
 streamlit
 opencv-python
+Pillow
+tensorflow
+requests
