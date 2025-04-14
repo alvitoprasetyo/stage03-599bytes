@@ -1,7 +1,6 @@
-matplotlib
-numpy
 streamlit
 opencv-python
+numpy
 Pillow
 tensorflow
 requests
