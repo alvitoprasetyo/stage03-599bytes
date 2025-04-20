@@ -1,0 +1,3 @@
+hugging face AI model : https://huggingface.co/chemirst/disability-detection
+
+ubidots : https://stem.ubidots.com/app/dashboards/67b9293e50c038182f9e4a19?devices=67b9293b9e48fa148b7c3a9a
